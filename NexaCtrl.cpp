@@ -1,251 +1,210 @@
 /**
- * NexaCtrl Library v.02 - Nexa/HomeEasy control library with absolute dim support.
+ * NexaCtrl Library v3 - Nexa/HomeEasy control library with absolute dim support.
  * Original author of this library is James Taylor (http://jtlog.wordpress.com/)
  *
- * Version 02 by Carl Gunnarsson - Refactoring and adding support for absolute dimming
+ * v2 by Carl Gunnarsson - refactoring and adding support for absolute dimming
+ * v3 by Joe Lippa - made compatible with the ESP8266 arduino core + refactoring
  */
 
 #include "NexaCtrl.h"
 
-extern "C" {
-    // AVR LibC Includes
-#include <inttypes.h>
-#include <avr/interrupt.h>
+/*
+ * constructor
+ */
+ESP8266_FLASH_ATTR NexaCtrl::NexaCtrl(
+		unsigned int tx_pin,
+		unsigned long controller_id,
+		int transmitCount,
+		unsigned int led_pin) {
+
+	_tx_pin = tx_pin;
+	pinMode(_tx_pin, OUTPUT);
+
+	_controller_id = controller_id != 0 ? controller_id : NexaCtrl::CONTROLLER_ID;
+	_transmitCount = transmitCount;
+
+	if (led_pin != 0) {
+		_led_pin = led_pin;
+		pinMode(_led_pin, OUTPUT);
+	}
+
+	// PULSE_LENGTH + DIM_LENGTH because we need room for dim bits if
+	// we want to transmit a dim signal
+	low_pulse_array = (int*) calloc((NexaCtrl::PULSE_LENGTH + (2 * NexaCtrl::DIM_LENGTH)), sizeof(int));
 }
-
-const int NexaCtrl::kPulseHigh = 275;
-const int NexaCtrl::kPulseLow0 = 275;
-const int NexaCtrl::kPulseLow1 = 1225;
-
-const int NexaCtrl::kLowPulseLength = 64;
 
 /*
- * The actual message is 32 bits of data:
- * bits 0-25: the group code - a 26bit number assigned to controllers.
- * bit 26: group flag
- * bit 27: on/off/dim flag
- * bits 28-31: the device code - 4bit number.
- * bits 32-35: the dim level - 4bit number.
+ * primary switch on/off public interface method
  */
-const int NexaCtrl::kControllerIdOffset = 0;
-const int NexaCtrl::kControllerIdLength = 26;
-const int NexaCtrl::kGroupFlagOffset = 26;
-const int NexaCtrl::kOnFlagOffset = 27;
-const int NexaCtrl::kDeviceIdOffset = 28;
-const int NexaCtrl::kDeviceIdLength = 4;
-const int NexaCtrl::kDimOffset = 32;
-const int NexaCtrl::kDimLength = 4;
-
-NexaCtrl::NexaCtrl(unsigned int tx_pin, unsigned int rx_pin, unsigned int led_pin)
-{
-    led_pin_ = led_pin;
-    pinMode(led_pin_, OUTPUT);
-
-    NexaCtrl(tx_pin, rx_pin);
+void ESP8266_FLASH_ATTR NexaCtrl::Switch(unsigned int device_id, uint8_t value) {
+	switch(value){
+		case LOW:
+			DeviceOff(device_id);
+			break;
+		case HIGH:
+			DeviceOn(device_id);
+			break;
+		default:
+		    DeviceDim(device_id, value);
+		    break;
+	}
 }
 
-NexaCtrl::NexaCtrl(unsigned int tx_pin, unsigned int rx_pin)
-{
-    tx_pin_ = tx_pin;
-    rx_pin_ = rx_pin;
-    pinMode(tx_pin_, OUTPUT);
-    pinMode(rx_pin_, INPUT);
-
-    // kLowPulseLength + kDimLength because we need room for dim bits if
-    // we want to transmit a dim signal
-    low_pulse_array = (int*)calloc((kLowPulseLength + (2 * kDimLength)), sizeof(int));
+void ESP8266_FLASH_ATTR NexaCtrl::DeviceOff(unsigned int device_id) {
+	SetControllerBits();
+	SetBit(NexaCtrl::GROUP_FLAG_OFFSET, 0);
+	SetBit(NexaCtrl::COMMAND_FLAG_OFFSET, 0);
+	SetDeviceBits(device_id);
+	Transmit(NexaCtrl::PULSE_LENGTH);
 }
 
-void NexaCtrl::DeviceOn(unsigned long controller_id, unsigned int device_id)
-{
-    SetControllerBits(controller_id);
-    SetBit(kGroupFlagOffset, 0);
-    SetBit(kOnFlagOffset, 1);
-    SetDeviceBits(device_id);
-    Transmit(kLowPulseLength);
+void ESP8266_FLASH_ATTR NexaCtrl::DeviceOn(unsigned int device_id) {
+	SetControllerBits();
+	SetBit(NexaCtrl::GROUP_FLAG_OFFSET, 0);
+	SetBit(NexaCtrl::COMMAND_FLAG_OFFSET, 1);
+	SetDeviceBits(device_id);
+	Transmit(NexaCtrl::PULSE_LENGTH);
 }
 
-void NexaCtrl::DeviceOff(unsigned long controller_id, unsigned int device_id)
-{
-    SetControllerBits(controller_id);
-    SetBit(kGroupFlagOffset, 0);
-    SetBit(kOnFlagOffset, 0);
-    SetDeviceBits(device_id);
-    Transmit(kLowPulseLength);
+void ESP8266_FLASH_ATTR NexaCtrl::DeviceDim(unsigned int device_id, unsigned int dim_level) {
+
+	SetControllerBits();
+
+	SetBit(NexaCtrl::GROUP_FLAG_OFFSET, 0);
+
+	// Specific for dim
+	low_pulse_array[(NexaCtrl::COMMAND_FLAG_OFFSET * 2)] = NexaCtrl::PULSE_LOW;
+	low_pulse_array[(NexaCtrl::COMMAND_FLAG_OFFSET * 2) + 1] = NexaCtrl::PULSE_LOW;
+
+	SetDeviceBits(device_id);
+
+	// Normally, allowed input would be 0-15, but 0-100 makes more sense.
+	dim_level *= (15 / 100);
+
+	bool dim_bits[NexaCtrl::DIM_LENGTH];
+	itob(dim_bits, dim_level, NexaCtrl::DIM_LENGTH);
+
+	for (int bit = 0; bit < NexaCtrl::DIM_LENGTH; bit++) {
+		SetBit(NexaCtrl::DIM_OFFSET + bit, dim_bits[bit]);
+	}
+	Transmit(NexaCtrl::PULSE_LENGTH + (NexaCtrl::DIM_LENGTH * 2));
 }
 
-void NexaCtrl::DeviceDim(unsigned long controller_id, unsigned int device_id, unsigned int dim_level)
-{
-    SetControllerBits(controller_id);
-
-    SetBit(kGroupFlagOffset, 0);
-
-    // Specific for dim
-    low_pulse_array[(kOnFlagOffset*2)] = kPulseLow0;
-    low_pulse_array[(kOnFlagOffset*2) + 1] = kPulseLow0;
-
-    SetDeviceBits(device_id);
-
-    bool dim_bits[kDimLength];
-    itob(dim_bits, dim_level, kDimLength);
-
-    int bit;
-    for (bit = 0; bit<kDimLength; bit++) {
-        SetBit(kDimOffset+bit, dim_bits[bit]);
-    }
-    Transmit(kLowPulseLength + (kDimLength * 2));
+void ESP8266_FLASH_ATTR NexaCtrl::GroupOn() {
+	unsigned int device_id = 0;
+	SetControllerBits();
+	SetDeviceBits(device_id);
+	SetBit(NexaCtrl::GROUP_FLAG_OFFSET, 1);
+	SetBit(NexaCtrl::COMMAND_FLAG_OFFSET, 1);
+	Transmit(NexaCtrl::PULSE_LENGTH);
 }
 
-void NexaCtrl::GroupOn(unsigned long controller_id)
-{
-    unsigned int device_id = 0;
-    SetControllerBits(controller_id);
-    SetDeviceBits(device_id);
-    SetBit(kGroupFlagOffset, 1);
-    SetBit(kOnFlagOffset, 1);
-    Transmit(kLowPulseLength);
+void ESP8266_FLASH_ATTR NexaCtrl::GroupOff() {
+	unsigned int device_id = 0;
+	SetControllerBits();
+	SetDeviceBits(device_id);
+	SetBit(NexaCtrl::GROUP_FLAG_OFFSET, 1);
+	SetBit(NexaCtrl::COMMAND_FLAG_OFFSET, 0);
+	Transmit(NexaCtrl::PULSE_LENGTH);
 }
 
-void NexaCtrl::GroupOff(unsigned long controller_id)
-{
-    unsigned int device_id = 0;
-    SetControllerBits(controller_id);
-    SetDeviceBits(device_id);
-    SetBit(kGroupFlagOffset, 1);
-    SetBit(kOnFlagOffset, 0);
-    Transmit(kLowPulseLength);
+// private methods
+void ESP8266_FLASH_ATTR NexaCtrl::SetDeviceBits(unsigned int device_id) {
+	bool device[NexaCtrl::DEVICE_ID_LENGTH];
+	unsigned long ldevice_id = device_id;
+	itob(device, ldevice_id, NexaCtrl::DEVICE_ID_LENGTH);
+	for (int bit = 0; bit < NexaCtrl::DEVICE_ID_LENGTH; bit++) {
+		SetBit(NexaCtrl::DEVICE_ID_OFFSET + bit, device[bit]);
+	}
 }
 
-// Private methods
-void NexaCtrl::SetDeviceBits(unsigned int device_id)
-{
-    bool device[kDeviceIdLength];
-    unsigned long ldevice_id = device_id;
-    itob(device, ldevice_id, kDeviceIdLength);
-    int bit;
-    for (bit=0; bit < kDeviceIdLength; bit++) {
-        SetBit(kDeviceIdOffset+bit, device[bit]);
-    }
+void ESP8266_FLASH_ATTR NexaCtrl::SetControllerBits() {
+	bool controller[NexaCtrl::CONTROLLER_ID_LENGTH];
+	itob(controller, _controller_id, NexaCtrl::CONTROLLER_ID_LENGTH);
+
+	for (int bit = 0; bit < NexaCtrl::CONTROLLER_ID_LENGTH; bit++) {
+		SetBit(bit, controller[bit]);
+	}
 }
 
-void NexaCtrl::SetControllerBits(unsigned long controller_id)
-{
-    bool controller[kControllerIdLength];
-    itob(controller, controller_id, kControllerIdLength);
-
-    int bit;
-    for (bit=0; bit < kControllerIdLength; bit++) {
-        SetBit(kControllerIdOffset+bit, controller[bit]);
-    }
+void ESP8266_FLASH_ATTR NexaCtrl::SetBit(unsigned int bit_index, bool value) {
+	// Each actual bit of data is encoded as two bits on the wire...
+	if (!value) {
+		// Data 0 = Wire 01
+		low_pulse_array[(bit_index * 2)] = NexaCtrl::PULSE_LOW;
+		low_pulse_array[(bit_index * 2) + 1] = NexaCtrl::PULSE_LOW_2;
+	} else {
+		// Data 1 = Wire 10
+		low_pulse_array[(bit_index * 2)] = NexaCtrl::PULSE_LOW_2;
+		low_pulse_array[(bit_index * 2) + 1] = NexaCtrl::PULSE_LOW;
+	}
 }
 
-void NexaCtrl::SetBit(unsigned int bit_index, bool value)
-{
-    // Each actual bit of data is encoded as two bits on the wire...
-    if (!value) {
-        // Data 0 = Wire 01
-        low_pulse_array[(bit_index*2)] = kPulseLow0;
-        low_pulse_array[(bit_index*2) + 1] = kPulseLow1;
-    } else {
-        // Data 1 = Wire 10
-        low_pulse_array[(bit_index*2)] = kPulseLow1;
-        low_pulse_array[(bit_index*2) + 1] = kPulseLow0;
-    }
+void ESP8266_FLASH_ATTR NexaCtrl::itob(bool *bits, unsigned long integer, int length) {
+	for (int i = 0; i < length; i++) {
+		if ((integer / power2(length - 1 - i)) == 1) {
+			integer -= power2(length - 1 - i);
+			bits[i] = 1;
+		} else {
+			bits[i] = 0;
+		}
+	}
 }
 
-void NexaCtrl::Transmit(int pulse_length)
-{
-    int pulse_count;
-    int transmit_count;
+unsigned long ESP8266_FLASH_ATTR NexaCtrl::power2(int power) { //gives 2 to the (power)
+	return (unsigned long) 1 << power;
+}
 
-    cli(); // disable interupts
+void NexaCtrl::TransmitLatch(void) {
+	// high for a moment
+	digitalWrite(_tx_pin, HIGH);
+	delayMicroseconds(NexaCtrl::PULSE_LOW);
+	// low for 2675
+	digitalWrite(_tx_pin, LOW);
+	delayMicroseconds(2675);
+}
 
-    for (transmit_count = 0; transmit_count < 2; transmit_count++)
-    {
-        if (led_pin_ > 0) {
-            digitalWrite(led_pin_, HIGH);
-        }
-        TransmitLatch1();
-        TransmitLatch2();
+void NexaCtrl::Transmit(int pulse_length) {
 
-        /*
-         * Transmit the actual message
-         * every wire bit starts with the same short high pulse, followed
-         * by a short or long low pulse from an array of low pulse lengths
-         */
-        for (pulse_count = 0; pulse_count < pulse_length; pulse_count++)
+    for (int transmit_count = 0; transmit_count < _transmitCount; transmit_count++) {
+
         {
-            digitalWrite(tx_pin_, HIGH);
-            delayMicroseconds(kPulseHigh);
-            digitalWrite(tx_pin_, LOW);
-            delayMicroseconds(low_pulse_array[pulse_count]);
+            //timing critical start
+#ifdef ARDUINO_ARCH_ESP8266
+            InterruptLock lock;
+#else
+            noInterrupts();
+#endif
+            if (_led_pin > 0) {
+                digitalWrite(_led_pin, HIGH);
+            }
+
+            TransmitLatch();
+
+            /*
+             * Transmit the actual message
+             * every wire bit starts with the same short high pulse, followed
+             * by a short or long low pulse from an array of low pulse lengths
+             */
+            for (int pulse_count = 0; pulse_count < pulse_length; pulse_count++) {
+                digitalWrite(_tx_pin, HIGH);
+                delayMicroseconds(NexaCtrl::PULSE_HIGH);
+                digitalWrite(_tx_pin, LOW);
+                delayMicroseconds(low_pulse_array[pulse_count]);
+            }
+
+            TransmitLatch();
+
+            if (_led_pin > 0) {
+                digitalWrite(_led_pin, LOW);
+            }
+#ifndef ARDUINO_ARCH_ESP8266
+            interrupts();
+#endif
         }
 
-        TransmitLatch2();
-
-        if (led_pin_ > 0) {
-            digitalWrite(led_pin_, LOW);
-        }
-
-        delayMicroseconds(10000);
-    }
-
-    sei(); // enable interupts
-}
-
-void NexaCtrl::TransmitLatch1(void)
-{
-    // bit of radio shouting before we start
-    digitalWrite(tx_pin_, HIGH);
-    delayMicroseconds(kPulseLow0);
-    // low for 9900 for latch 1
-    digitalWrite(tx_pin_, LOW);
-    delayMicroseconds(9900);
-}
-
-void NexaCtrl::TransmitLatch2(void)
-{
-    // high for a moment 275
-    digitalWrite(tx_pin_, HIGH);
-    delayMicroseconds(kPulseLow0);
-    // low for 2675 for latch 2
-    digitalWrite(tx_pin_, LOW);
-    delayMicroseconds(2675);
-}
-
-void itob(bool *bits, unsigned long integer, int length) {
-    for (int i=0; i<length; i++){
-        if ((integer / power2(length-1-i))==1){
-            integer-=power2(length-1-i);
-            bits[i]=1;
-        }
-        else bits[i]=0;
+        delayMicroseconds(9500);
+        yield();
     }
 }
 
-unsigned long power2(int power){    //gives 2 to the (power)
-    return (unsigned long) 1 << power;
-}
-
-unsigned long htoi (const char *ptr)
-{
-    unsigned long value = 0;
-    char ch = *ptr;
-
-    while (ch == ' ' || ch == '\t') {
-        ch = *(++ptr);
-    }
-
-    for (;;) {
-        if (ch >= '0' && ch <= '9') {
-            value = (value << 4) + (ch - '0');
-        } else if (ch >= 'A' && ch <= 'F') {
-            value = (value << 4) + (ch - 'A' + 10);
-        } else if (ch >= 'a' && ch <= 'f') {
-            value = (value << 4) + (ch - 'a' + 10);
-        } else {
-            return value;
-        }
-        ch = *(++ptr);
-    }
-}

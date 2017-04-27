@@ -1,45 +1,48 @@
 NexaCtrl
 ========
 
-Arudino NexaCtrl Library v.02 - Nexa/HomeEasy control library for arduino with absolute dim support.  
-Original author of this library is James Taylor (http://jtlog.wordpress.com/)
+NexaCtrl Library v3. An Arduino/ESP8266 Nexa/HomeEasy control library with absolute dim support
+The original author of this library is James Taylor (http://jtlog.wordpress.com/)
 
-Version 02 by Carl Gunnarsson - Refactoring and adding support for absolute dimming.
+v2 Carl Gunnarsson. Refactoring and introduction of support for absolute dimming
+v3 Joe Lippa. Extensive refactoring and introduction of support for ESP8266 devices
+
+v3 was tested with an ESP12-F connected to an MX-FS-03V 433MHz transmitter operating at 3.3v, sending on and off signals to Home Easy HE107G and HE108G switches
 
 ## Example
 
 ```cpp
-#include <NexaCtrl.h>
+#include "Arduino.h"
+#include "NexaCtrl.h"
 
 #define TX_PIN 13
-#define RX_PIN 8
 
-// Your remote id which can be it can be "sniffed" with the 
-// reciever example at http://playground.arduino.cc/Code/HomeEasy
+// Your remote controller id which can be "sniffed" with the
+// receiver example at http://playground.arduino.cc/Code/HomeEasy
 const static unsigned long controller_id = 1234567;
-unsigned int device = 0;
+unsigned int device_id = 0;
 
-NexaCtrl nexaCtrl(TX_PIN, RX_PIN);
+NexaCtrl nexaCtrl(TX_PIN, controller_id);
 
 void setup()
 {
-    nexaCtrl.DeviceDim(controller_id, device, 0);
+    nexaCtrl.DeviceDim(device_id, 0);
     delay(3000);
-    nexaCtrl.DeviceDim(controller_id, device, 15);
+    nexaCtrl.DeviceDim(device_id, 15);
     delay(3000);
-    nexaCtrl.DeviceDim(controller_id, device, 0);
+    nexaCtrl.DeviceDim(device_id, 0);
 
     delay(3000);
 
-    nexaCtrl.DeviceOn(controller_id, device);
+    nexaCtrl.DeviceOn(device_id);
     delay(3000);
-    nexaCtrl.DeviceOff(controller_id, device);
+    nexaCtrl.DeviceOff(device_id);
 
     delay(3000);
 
-    nexaCtrl.GroupOff(controller_id);
+    nexaCtrl.GroupOff();
     delay(3000);
-    nexaCtrl.GroupOn(controller_id);
+    nexaCtrl.GroupOn();
 }
 
 void loop()
