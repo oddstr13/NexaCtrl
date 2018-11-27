@@ -7,11 +7,16 @@
 
 #include "NexaCtrl.h"
 
-extern "C" {
+//extern "C" {
     // AVR LibC Includes
 #include <inttypes.h>
+
+#ifdef ARDUINO_ARCH_ESP8266
+#include <interrupts.h>
+#else
 #include <avr/interrupt.h>
-}
+#endif
+//}
 
 const int NexaCtrl::kPulseHigh = 275;
 const int NexaCtrl::kPulseLow0 = 275;
@@ -36,20 +41,25 @@ const int NexaCtrl::kDeviceIdLength = 4;
 const int NexaCtrl::kDimOffset = 32;
 const int NexaCtrl::kDimLength = 4;
 
-NexaCtrl::NexaCtrl(unsigned int tx_pin, unsigned int rx_pin, unsigned int led_pin)
+#ifdef VSCODE_LINTING
+extern _PTR	calloc(size_t, size_t);
+#endif
+
+NexaCtrl::NexaCtrl(int tx_pin, int rx_pin, int led_pin)
 {
     led_pin_ = led_pin;
-    pinMode(led_pin_, OUTPUT);
-
-    NexaCtrl(tx_pin, rx_pin);
-}
-
-NexaCtrl::NexaCtrl(unsigned int tx_pin, unsigned int rx_pin)
-{
     tx_pin_ = tx_pin;
     rx_pin_ = rx_pin;
+
     pinMode(tx_pin_, OUTPUT);
-    pinMode(rx_pin_, INPUT);
+
+    if (led_pin_ >= 0) {
+        pinMode(led_pin_, OUTPUT);
+    }
+
+    if (rx_pin_ >= 0) {
+        pinMode(rx_pin_, INPUT);
+    }
 
     // kLowPulseLength + kDimLength because we need room for dim bits if
     // we want to transmit a dim signal
@@ -158,13 +168,18 @@ void NexaCtrl::Transmit(int pulse_length)
     int pulse_count;
     int transmit_count;
 
-    cli(); // disable interupts
-
     for (transmit_count = 0; transmit_count < 2; transmit_count++)
     {
-        if (led_pin_ > 0) {
+        if (led_pin_ >= 0) {
             digitalWrite(led_pin_, HIGH);
         }
+        
+        // Timing critical
+#ifdef ARDUINO_ARCH_ESP8266
+        {InterruptLock lock;
+#else
+        cli(); // disable interupts (probably AVR specific)
+#endif
         TransmitLatch1();
         TransmitLatch2();
 
@@ -183,14 +198,18 @@ void NexaCtrl::Transmit(int pulse_length)
 
         TransmitLatch2();
 
-        if (led_pin_ > 0) {
+#ifdef ARDUINO_ARCH_ESP8266
+        }
+#else
+        sei(); // enable interupts
+#endif
+        if (led_pin_ >= 0) {
             digitalWrite(led_pin_, LOW);
         }
 
-        delayMicroseconds(10000);
+        delay(10);
+        yield();
     }
-
-    sei(); // enable interupts
 }
 
 void NexaCtrl::TransmitLatch1(void)
